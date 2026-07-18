@@ -9,6 +9,13 @@
  *
  * API: GET https://api.tavily.com/usage
  *
+ * Refresh:
+ *   - session_start: initial fetch + start 10-min timer
+ *   - agent_start:   prompt-time refresh when cooldown elapsed
+ *   - turn_end:      post-turn refresh when cooldown elapsed
+ *   - interval:      idle refresh (~every 10 min)
+ *   - /tavily-usage: force refresh + details
+ *
  * Commands:
  *   /tavily-usage        force refresh + show details
  *   /tavily-usage clear  hide footer
@@ -20,8 +27,14 @@ import { join } from "node:path";
 
 const STATUS_ID = "tavily-usage";
 const USAGE_URL = "https://api.tavily.com/usage";
-const FETCH_COOLDOWN_MS = 120_000;
+/** Minimum time between successful fetches. */
+const FETCH_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+/** Retry sooner after a failed fetch (don't lock out for a full cooldown). */
+const ERROR_RETRY_MS = 30 * 1000; // 30 seconds
+/** Interval tick slightly under cooldown so timer edges don't no-op. */
+const PERIODIC_TICK_MS = FETCH_COOLDOWN_MS - 15_000; // 9m45s
 const REQUEST_TIMEOUT_MS = 10_000;
+/** Fallback when Tavily 429 omits Retry-After. */
 const DEFAULT_RETRY_AFTER_MS = 300_000;
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 
@@ -83,6 +96,11 @@ function sanitizeError(err: unknown): string {
 	return "request failed";
 }
 
+function isStaleContextError(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return msg.includes("stale after session") || msg.includes("extension ctx is stale");
+}
+
 function readKeyFromAuthJson(): string | null {
 	if (!existsSync(AUTH_PATH)) return null;
 	try {
@@ -137,7 +155,7 @@ async function fetchUsage(apiKey: string, signal: AbortSignal): Promise<UsageSna
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			Accept: "application/json",
-			"User-Agent": "pi-tavily-usage/1.0",
+			"User-Agent": "pi-tavily-usage/1.0.2",
 		},
 		signal,
 	});
@@ -228,7 +246,11 @@ function formatFooter(
 class TavilyUsageCache {
 	private last: UsageSnapshot | null = null;
 	private lastError: string | null = null;
-	private lastFetchTime = 0;
+	/** Timestamp of last successful fetch (drives success cooldown). */
+	private lastSuccessTime = 0;
+	/** Timestamp of last failed fetch (drives short error backoff). */
+	private lastErrorTime = 0;
+	/** Hard floor from Tavily Retry-After on 429. */
 	private backoffUntil = 0;
 	private inflight: Promise<void> | null = null;
 	private generation = 0;
@@ -242,25 +264,36 @@ class TavilyUsageCache {
 		ctx.ui.setStatus(STATUS_ID, undefined);
 	}
 
-	async update(ctx: ExtensionContext, opts: { force?: boolean } = {}): Promise<UsageSnapshot | null> {
+	/** True when a network fetch is allowed under cooldown rules. */
+	private canFetch(force: boolean): boolean {
+		if (force) return true;
 		const now = Date.now();
 
-		if (!opts.force && now < this.backoffUntil) {
+		// Explicit 429 Retry-After window.
+		if (now < this.backoffUntil) return false;
+
+		// Successful fetch: full 10-min cooldown.
+		if (this.lastSuccessTime && now - this.lastSuccessTime < FETCH_COOLDOWN_MS) {
+			return false;
+		}
+
+		// Failed fetch (and no newer success): short backoff only.
+		if (this.lastErrorTime > this.lastSuccessTime && now - this.lastErrorTime < ERROR_RETRY_MS) {
+			return false;
+		}
+
+		return true;
+	}
+
+	async update(ctx: ExtensionContext, opts: { force?: boolean } = {}): Promise<UsageSnapshot | null> {
+		const force = opts.force === true;
+
+		if (!this.canFetch(force)) {
 			this.setStatus(ctx);
 			return this.last;
 		}
 
-		if (
-			!opts.force &&
-			this.last &&
-			this.lastFetchTime &&
-			now - this.lastFetchTime < FETCH_COOLDOWN_MS
-		) {
-			this.setStatus(ctx);
-			return this.last;
-		}
-
-		if (this.inflight && !opts.force) {
+		if (this.inflight && !force) {
 			await this.inflight;
 			this.setStatus(ctx);
 			return this.last;
@@ -281,27 +314,32 @@ class TavilyUsageCache {
 				if (gen !== this.generation) return;
 
 				if (!snap) {
-					// Empty body: keep previous or show N/A-ish via no snap
-					if (!this.last) {
-						this.lastError = null;
-						this.setStatus(ctx);
-					} else {
-						this.setStatus(ctx);
-					}
-					this.lastFetchTime = Date.now();
+					// Empty body: API reachable, no usage history yet.
+					// Count as success so we don't hammer the endpoint.
+					this.lastError = null;
+					this.lastSuccessTime = Date.now();
+					this.lastErrorTime = 0;
+					this.backoffUntil = 0;
+					this.setStatus(ctx);
 					return;
 				}
 
 				this.last = snap;
 				this.lastError = null;
-				this.lastFetchTime = Date.now();
+				this.lastSuccessTime = Date.now();
+				this.lastErrorTime = 0;
 				this.backoffUntil = 0;
 				this.setStatus(ctx);
 			} catch (err) {
 				if (gen !== this.generation) return;
+				if (isStaleContextError(err)) {
+					// Don't burn cooldown on stale ctx — caller should rebind.
+					throw err;
+				}
 				const msg = sanitizeError(err);
 				this.lastError = msg;
-				this.lastFetchTime = Date.now();
+				this.lastErrorTime = Date.now();
+				// Do NOT advance success cooldown on failure.
 
 				// Honor rate-limit backoff when message encodes seconds.
 				const m = /^rate limited \((\d+)s\)$/.exec(msg);
@@ -309,6 +347,7 @@ class TavilyUsageCache {
 					this.backoffUntil = Date.now() + Number(m[1]) * 1000;
 				}
 
+				// Keep stale data if we have it.
 				this.setStatus(ctx, this.last ? undefined : this.lastError);
 			} finally {
 				clearTimeout(timeout);
@@ -352,22 +391,81 @@ class TavilyUsageCache {
 
 export default function (pi: ExtensionAPI) {
 	const cache = new TavilyUsageCache();
+	let lastCtx: ExtensionContext | null = null;
+	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+	const remember = (ctx: ExtensionContext) => {
+		lastCtx = ctx;
+	};
+
+	const stopPeriodicRefresh = () => {
+		if (refreshTimer) {
+			clearInterval(refreshTimer);
+			refreshTimer = null;
+		}
+	};
+
+	const startPeriodicRefresh = () => {
+		if (refreshTimer) return;
+		refreshTimer = setInterval(() => {
+			const ctx = lastCtx;
+			if (!ctx) return;
+			// Cooldown still applies; tick is slightly under 10m so edges don't miss.
+			cache.update(ctx).catch((err) => {
+				if (isStaleContextError(err)) {
+					// Session was replaced — drop dead ctx and wait for a live event.
+					lastCtx = null;
+					return;
+				}
+				// Soft-fail: keep last known status; next tick/event retries.
+			});
+		}, PERIODIC_TICK_MS);
+		// Don't keep the process alive solely for this timer if Pi exits.
+		if (typeof refreshTimer === "object" && refreshTimer && "unref" in refreshTimer) {
+			(refreshTimer as NodeJS.Timeout).unref?.();
+		}
+	};
+
+	const kick = (ctx: ExtensionContext, opts?: { force?: boolean }) => {
+		remember(ctx);
+		startPeriodicRefresh();
+		cache.update(ctx, opts).catch((err) => {
+			if (isStaleContextError(err)) {
+				lastCtx = null;
+			}
+		});
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		cache.update(ctx).catch(() => {});
+		// Fire-and-forget: never block session startup.
+		kick(ctx);
 	});
 
+	// Prompt-time: refresh as soon as a new agent run starts if cooldown elapsed.
+	pi.on("agent_start", async (_event, ctx) => {
+		kick(ctx);
+	});
+
+	// Post-turn: catch usage that landed during the turn.
 	pi.on("turn_end", async (_event, ctx) => {
-		cache.update(ctx).catch(() => {});
+		kick(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		cache.clear(ctx);
+		stopPeriodicRefresh();
+		lastCtx = null;
+		try {
+			cache.clear(ctx);
+		} catch {
+			// ctx may already be tearing down
+		}
 	});
 
 	pi.registerCommand("tavily-usage", {
 		description: "Show/refresh Tavily account credit usage in the footer",
 		handler: async (args, ctx) => {
+			remember(ctx);
+			startPeriodicRefresh();
 			const cmd = (args ?? "").trim().toLowerCase();
 			if (cmd === "clear" || cmd === "hide" || cmd === "off") {
 				cache.clear(ctx);

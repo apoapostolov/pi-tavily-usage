@@ -1,6 +1,6 @@
 {
   "name": "pi-tavily-usage",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Pi extension that shows Tavily API plan usage in the status bar. Footer like Tavily:67.8% using TAVILY_API_KEY.",
   "type": "module",
   "main": "src/index.ts",
