@@ -23,7 +23,7 @@ pi install git:github.com/apoapostolov/pi-tavily-usage
 Or pin a tag:
 
 ```bash
-pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.0
+pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.1
 ```
 
 Reload Pi (`/reload` or new session).
@@ -96,6 +96,10 @@ export TAVILY_API_KEY="tvly-..."
 # then in Pi:
 /tavily-usage
 ```
+
+### Footer shows `Tavily:ratelimit`
+
+Usage endpoint returned 429. Wait for cooldown (honors `Retry-After`), avoid stacking multiple Tavily usage footers (`pi-tavily-tools` also paints one), then `/tavily-usage`.
 
 ### Footer stuck on `Tavily:…`
 

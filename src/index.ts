@@ -194,6 +194,16 @@ async function fetchUsage(apiKey: string, signal: AbortSignal): Promise<UsageSna
 	};
 }
 
+function formatErrorLabel(error: string): string {
+	const e = error.toLowerCase();
+	if (e.startsWith("rate limited") || e.includes("rate limit")) return "ratelimit";
+	if (e.startsWith("auth ") || e.includes("no tavily api key") || e.includes("api key")) return "auth?";
+	if (e.includes("timeout")) return "timeout";
+	if (e.includes("network")) return "network";
+	if (e.startsWith("http ")) return e.slice(5); // e.g. "HTTP 500" → "500"
+	return "err";
+}
+
 function formatFooter(
 	theme: ExtensionContext["ui"]["theme"],
 	snap: UsageSnapshot | null,
@@ -201,7 +211,7 @@ function formatFooter(
 ): string {
 	const label = theme.fg("muted", "Tavily:");
 	if (error && !snap) {
-		return label + theme.fg("warning", "auth?");
+		return label + theme.fg("warning", formatErrorLabel(error));
 	}
 	if (!snap) {
 		return label + theme.fg("accent", "…");
