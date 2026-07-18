@@ -23,7 +23,7 @@ pi install git:github.com/apoapostolov/pi-tavily-usage
 Or pin a tag:
 
 ```bash
-pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.2
+pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.1
 ```
 
 Reload Pi (`/reload` or new session).

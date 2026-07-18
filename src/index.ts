@@ -155,7 +155,7 @@ async function fetchUsage(apiKey: string, signal: AbortSignal): Promise<UsageSna
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			Accept: "application/json",
-			"User-Agent": "pi-tavily-usage/1.0.2",
+			"User-Agent": "pi-tavily-usage/1.0.1",
 		},
 		signal,
 	});
