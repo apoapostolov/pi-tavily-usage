@@ -23,7 +23,7 @@ pi install git:github.com/apoapostolov/pi-tavily-usage
 Or pin a tag:
 
 ```bash
-pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.1
+pi install git:github.com/apoapostolov/pi-tavily-usage@v1.0.2
 ```
 
 Reload Pi (`/reload` or new session).
@@ -48,7 +48,7 @@ Get a key at [tavily.com](https://tavily.com).
 |--------|----------|
 | Footer | `Tavily:<pct.1>%` of plan |
 | Colors | normal → warning ≥80% → error ≥95% |
-| Refresh | session start + turn end (120s cache) |
+| Refresh | session start, agent start, turn end, idle timer (10 min cooldown) |
 | `/tavily-usage` | force refresh + breakdown |
 | `/tavily-usage clear` | hide footer |
 
