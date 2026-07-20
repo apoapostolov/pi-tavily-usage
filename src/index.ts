@@ -31,8 +31,15 @@ const USAGE_URL = "https://api.tavily.com/usage";
 const FETCH_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 /** Retry sooner after a failed fetch (don't lock out for a full cooldown). */
 const ERROR_RETRY_MS = 30 * 1000; // 30 seconds
-/** Interval tick slightly under cooldown so timer edges don't no-op. */
-const PERIODIC_TICK_MS = FETCH_COOLDOWN_MS - 15_000; // 9m45s
+/**
+ * Idle poll cadence. Must be >= FETCH_COOLDOWN_MS.
+ *
+ * Prior bug: this was cooldown - 15s (9m45s). After a success at T=0 the first
+ * tick always hit the 10m cooldown and no-op'd, so the next real fetch only
+ * landed at T=19m30s. Effective idle refresh was ~19.5 min, not 10.
+ * Keep a small positive skew so timer jitter can't land inside the cooldown.
+ */
+const PERIODIC_TICK_MS = FETCH_COOLDOWN_MS + 5_000; // 10m5s
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Fallback when Tavily 429 omits Retry-After. */
 const DEFAULT_RETRY_AFTER_MS = 300_000;
@@ -255,13 +262,23 @@ class TavilyUsageCache {
 	private inflight: Promise<void> | null = null;
 	private generation = 0;
 
-	setStatus(ctx: ExtensionContext, forceError?: string): void {
-		const status = formatFooter(ctx.ui.theme, this.last, forceError ?? this.lastError ?? undefined);
-		ctx.ui.setStatus(STATUS_ID, status);
+	setStatus(ctx: ExtensionContext | null, forceError?: string): void {
+		if (!ctx) return;
+		try {
+			const status = formatFooter(ctx.ui.theme, this.last, forceError ?? this.lastError ?? undefined);
+			ctx.ui.setStatus(STATUS_ID, status);
+		} catch (err) {
+			// Stale session ctx after reload/switch — don't kill the idle timer.
+			if (!isStaleContextError(err)) throw err;
+		}
 	}
 
 	clear(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(STATUS_ID, undefined);
+		try {
+			ctx.ui.setStatus(STATUS_ID, undefined);
+		} catch (err) {
+			if (!isStaleContextError(err)) throw err;
+		}
 	}
 
 	/** True when a network fetch is allowed under cooldown rules. */
@@ -285,7 +302,7 @@ class TavilyUsageCache {
 		return true;
 	}
 
-	async update(ctx: ExtensionContext, opts: { force?: boolean } = {}): Promise<UsageSnapshot | null> {
+	async update(ctx: ExtensionContext | null, opts: { force?: boolean } = {}): Promise<UsageSnapshot | null> {
 		const force = opts.force === true;
 
 		if (!this.canFetch(force)) {
@@ -409,11 +426,11 @@ export default function (pi: ExtensionAPI) {
 		if (refreshTimer) return;
 		refreshTimer = setInterval(() => {
 			const ctx = lastCtx;
-			if (!ctx) return;
-			// Cooldown still applies; tick is slightly under 10m so edges don't miss.
+			// Still poll when ctx is missing/stale: fetch + cache without paint,
+			// then session_start/agent_start/turn_end rebind lastCtx and repaint.
 			cache.update(ctx).catch((err) => {
 				if (isStaleContextError(err)) {
-					// Session was replaced — drop dead ctx and wait for a live event.
+					// Session was replaced — drop dead ctx; keep timer alive for fetches.
 					lastCtx = null;
 					return;
 				}

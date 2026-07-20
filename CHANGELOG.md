@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Footer no longer shows `auth?` for every first-fetch failure
 - Rate limits render as `Tavily:ratelimit`; other failures map to `auth?` / `timeout` / `network` / HTTP status / `err`
+- Idle refresh actually hits ~10 min: interval is cooldown + 5s (10m5s), not cooldown − 15s (9m45s). The old "slightly under" tick always landed inside the 10-min success cooldown, so every other tick no-op'd and real idle fetches only ran every ~19.5 min
+- Stale session context no longer kills idle refresh forever: timer keeps fetching when `lastCtx` is missing until a live event rebinds it
 
 ### Changed
 
 - Refresh cadence aligned with `pi-grok-usage` model, on a **10-minute** success cooldown
-- Idle `setInterval` tick (~9m45s) so the meter updates even without turns
+- Idle `setInterval` tick at cooldown + 5s so the meter updates even without turns
 - Also refreshes on `agent_start` (prompt-time) and `turn_end` when cooldown elapsed
 - Failures no longer burn the full cooldown (30s error retry; 429 still honors `Retry-After`)
 
