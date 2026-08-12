@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-12
+
+### Added
+
+- Multi-key pool storage/rotation copied from the Hermes TUI widget (`07-tavily-usage.mjs`)
+- Auth order now matches Hermes: in-memory `/tavily-auth` → `~/.hermes/tavily-keys.env` → lifestyle `.env` (with `${VAR}` + numbered `TAVILY_API_KEY_<N>` SoT) → `process.env` → `~/.hermes/.env` → `~/.pi/agent/auth.json`
+- Auto-rotate at plan ≥95%, paygo burn, or usage-API 401/403 via the same bedroom script (`tavily_key_rotate.py rotate --best`)
+- `/tavily-usage rotate`, `/tavily-usage pool`, `/tavily-usage auto on|off`, `/tavily-auth <key>`
+- Footer shows active pool tag (`#2`) and a rotate mark; details include pool size, last rotation, and reset countdown
+- Paygo meter matches Hermes (100–200% with `*` suffix)
+
+### Changed
+
+- This extension still does **not** write the pool itself. Rotate reuses the Hermes skill script so `tavily-keys.env`, lifestyle `.env`, Hermes `.env`, and mcporter stay one SoT
+- 5-minute rotate cooldown and pool-of-one skip match the widget
+
 ## [1.0.1] - 2026-07-18
 
 ### Fixed
@@ -50,5 +66,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Tavily:67.8%
 ```
 
+[1.1.0]: https://github.com/apoapostolov/pi-tavily-usage/releases/tag/v1.1.0
 [1.0.1]: https://github.com/apoapostolov/pi-tavily-usage/releases/tag/v1.0.1
 [1.0.0]: https://github.com/apoapostolov/pi-tavily-usage/releases/tag/v1.0.0

@@ -1,7 +1,7 @@
 {
   "name": "pi-tavily-usage",
-  "version": "1.0.1",
-  "description": "Pi extension that shows Tavily API plan usage in the status bar. Footer like Tavily:67.8% using TAVILY_API_KEY.",
+  "version": "1.1.0",
+  "description": "Pi extension that shows Tavily plan usage in the status bar and rotates a multi-key pool the same way as the Hermes Tavily widget.",
   "type": "module",
   "main": "src/index.ts",
   "exports": "./src/index.ts",
@@ -21,6 +21,7 @@
     "billing",
     "credits",
     "quota",
+    "key-rotation",
     "status-bar",
     "footer",
     "web-search",
