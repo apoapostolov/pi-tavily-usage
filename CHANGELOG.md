@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- On win32 the Hermes `.env` and `tavily-keys.env` resolve through the Ubuntu WSL distro, which is the only place those files exist
+- On win32 key rotation runs through `wsl.exe -d Ubuntu` when `tavily_key_rotate.py` is not reachable on the Windows side
+
+### Changed
+
+- Idle usage refresh listens to `powerbar:refresh` and repaints on `powerbar:tick` instead of a private `setInterval`, so refresh cadence is owned by the status bar rather than a second timer that had to be skewed past its own cooldown
+
 ## [1.1.0] - 2026-08-12
 
 ### Added

@@ -23,10 +23,10 @@
  * API: GET https://api.tavily.com/usage
  *
  * Refresh:
- *   - session_start: initial fetch + start 10-min timer
- *   - agent_start:   prompt-time refresh when cooldown elapsed
- *   - turn_end:      post-turn refresh when cooldown elapsed
- *   - interval:      idle refresh (~every 10 min)
+ *   - session_start: initial fetch
+ *   - agent_start / turn_end: refresh when cooldown elapsed
+ *   - powerbar:refresh: shared idle fetch (default 10m5s)
+ *   - powerbar:tick: status repaint
  *   - /tavily-usage: force refresh + details
  *
  * Commands:
@@ -50,15 +50,6 @@ const USAGE_URL = "https://api.tavily.com/usage";
 const FETCH_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 /** Retry sooner after a failed fetch (don't lock out for a full cooldown). */
 const ERROR_RETRY_MS = 30 * 1000; // 30 seconds
-/**
- * Idle poll cadence. Must be >= FETCH_COOLDOWN_MS.
- *
- * Prior bug: this was cooldown - 15s (9m45s). After a success at T=0 the first
- * tick always hit the 10m cooldown and no-op'd, so the next real fetch only
- * landed at T=19m30s. Effective idle refresh was ~19.5 min, not 10.
- * Keep a small positive skew so timer jitter can't land inside the cooldown.
- */
-const PERIODIC_TICK_MS = FETCH_COOLDOWN_MS + 5_000; // 10m5s
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Fallback when Tavily 429 omits Retry-After. */
 const DEFAULT_RETRY_AFTER_MS = 300_000;
@@ -66,12 +57,18 @@ const DEFAULT_RETRY_AFTER_MS = 300_000;
 const ROTATE_THRESHOLD = 95;
 const ROTATE_COOLDOWN_MS = 5 * 60 * 1000;
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
-const LIFESTYLE_ENV_PATH = "/mnt/c/git/lifestyle/.env";
-const HERMES_ENV_PATH = join(homedir(), ".hermes", ".env");
-const TAVILY_KEYS_ENV_PATH = join(homedir(), ".hermes", "tavily-keys.env");
+const WSL_HERMES =
+	process.platform === "win32"
+		? "\\\\wsl.localhost\\Ubuntu\\home\\apoapostolov\\.hermes"
+		: join(homedir(), ".hermes");
+const LIFESTYLE_ENV_PATH =
+	process.platform === "win32" ? "C:\\git\\lifestyle\\.env" : "/mnt/c/git/lifestyle/.env";
+const HERMES_ENV_PATH = join(WSL_HERMES, ".env");
+const TAVILY_KEYS_ENV_PATH = join(WSL_HERMES, "tavily-keys.env");
+const ROTATE_SCRIPT_LINUX =
+	"/home/apoapostolov/.hermes/skills/mcp/tavily-key-rotation/scripts/tavily_key_rotate.py";
 const ROTATE_SCRIPT = join(
-	homedir(),
-	".hermes",
+	WSL_HERMES,
 	"skills",
 	"mcp",
 	"tavily-key-rotation",
@@ -442,16 +439,27 @@ async function fetchUsage(apiKey: string, signal: AbortSignal): Promise<UsageSna
 }
 
 function runRotateScript({ force = false, reason = "widget-auto" }: { force?: boolean; reason?: string } = {}): RotateResult {
-	if (!existsSync(ROTATE_SCRIPT)) {
+	const scriptExists =
+		process.platform === "win32"
+			? existsSync(ROTATE_SCRIPT) || existsSync(ROTATE_SCRIPT_LINUX)
+			: existsSync(ROTATE_SCRIPT);
+	if (!scriptExists) {
 		return { ok: false, note: "no-script" };
 	}
-	const args = [ROTATE_SCRIPT, "rotate", "--reason", reason, "--best"];
+	const args = ["rotate", "--reason", reason, "--best"];
 	if (force) args.push("--force");
-	const res = spawnSync("python3", args, {
-		encoding: "utf8",
-		timeout: 45_000,
-		env: process.env,
-	});
+	const res =
+		process.platform === "win32"
+			? spawnSync(
+					"wsl.exe",
+					["-d", "Ubuntu", "--", "python3", ROTATE_SCRIPT_LINUX, ...args],
+					{ encoding: "utf8", timeout: 45_000, env: process.env },
+				)
+			: spawnSync("python3", [ROTATE_SCRIPT, ...args], {
+					encoding: "utf8",
+					timeout: 45_000,
+					env: process.env,
+				});
 	const out = `${res.stdout || ""}\n${res.stderr || ""}`.trim();
 	const m = /applied:\s*index\s+(\d+)\s*->\s*(\d+)\s+label=(\S+)/i.exec(out);
 	const skipped = /skip:\s*active/i.test(out);
@@ -822,44 +830,28 @@ class TavilyUsageCache {
 export default function (pi: ExtensionAPI) {
 	const cache = new TavilyUsageCache();
 	let lastCtx: ExtensionContext | null = null;
-	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	const remember = (ctx: ExtensionContext) => {
 		lastCtx = ctx;
 	};
 
-	const stopPeriodicRefresh = () => {
-		if (refreshTimer) {
-			clearInterval(refreshTimer);
-			refreshTimer = null;
-		}
-	};
-
-	const startPeriodicRefresh = () => {
-		if (refreshTimer) return;
-		refreshTimer = setInterval(() => {
-			const ctx = lastCtx;
-			cache.update(ctx).catch((err) => {
-				if (isStaleContextError(err)) {
-					lastCtx = null;
-					return;
-				}
-			});
-		}, PERIODIC_TICK_MS);
-		if (typeof refreshTimer === "object" && refreshTimer && "unref" in refreshTimer) {
-			(refreshTimer as NodeJS.Timeout).unref?.();
-		}
-	};
-
 	const kick = (ctx: ExtensionContext, opts?: { force?: boolean }) => {
 		remember(ctx);
-		startPeriodicRefresh();
 		cache.update(ctx, opts).catch((err) => {
 			if (isStaleContextError(err)) {
 				lastCtx = null;
 			}
 		});
 	};
+
+	pi.events.on("powerbar:refresh", () => {
+		cache.update(lastCtx).catch((err) => {
+			if (isStaleContextError(err)) lastCtx = null;
+		});
+	});
+	pi.events.on("powerbar:tick", () => {
+		cache.setStatus(lastCtx);
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		kick(ctx);
@@ -874,7 +866,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		stopPeriodicRefresh();
 		lastCtx = null;
 		try {
 			cache.clear(ctx);
@@ -885,7 +876,6 @@ export default function (pi: ExtensionAPI) {
 
 	const handleUsage = async (args: string, ctx: ExtensionContext) => {
 		remember(ctx);
-		startPeriodicRefresh();
 		const raw = (args ?? "").trim();
 		const cmd = raw.toLowerCase();
 
